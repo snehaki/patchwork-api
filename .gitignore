@@ -1,0 +1,13 @@
+node_modules/
+
+.env.local
+.idea/
+Thumbs.db
+*.js.map
+.next/
+Desktop.ini
+*.log
+*.tsbuildinfo
+.vscode/
+npm-debug.log*
+build/
