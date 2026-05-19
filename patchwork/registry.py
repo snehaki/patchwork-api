@@ -1,71 +1,78 @@
-"""In-memory registry that stores and looks up validated route definitions."""
+"""Route registry: stores validated definitions and resolves incoming requests."""
 
-from __future__ import annotations
+import logging
+from typing import Optional
 
-from typing import Iterator
+from patchwork.loader import load_definitions_dir
+from patchwork.validator import validate_definitions
+from patchwork.matcher import match_route, MatchResult
 
-from patchwork.validator import validate_definitions, ValidationError  # noqa: F401
+logger = logging.getLogger(__name__)
 
 
 class RouteConflictError(Exception):
-    """Raised when two definitions share the same method + path combination."""
+    """Raised when two definitions share the same method + path pattern."""
 
 
 class Registry:
-    """Holds all loaded route definitions and provides lookup helpers."""
+    """Holds all active route definitions and resolves requests against them."""
 
     def __init__(self) -> None:
-        # Keyed by (METHOD, path) tuples for O(1) lookup
-        self._routes: dict[tuple[str, str], dict] = {}
+        self.routes: list[dict] = []
+        self.directory: Optional[str] = None
 
     # ------------------------------------------------------------------
     # Mutation
     # ------------------------------------------------------------------
 
-    def register(self, definition: dict, *, allow_override: bool = False) -> None:
-        """Add a single validated definition to the registry.
+    def register(self, definition: dict) -> None:
+        """Add a single validated definition, raising on duplicate routes."""
+        method = definition["method"]
+        path = definition["path"]
+        for existing in self.routes:
+            if existing["method"] == method and existing["path"] == path:
+                raise RouteConflictError(
+                    f"Duplicate route: {method} {path}"
+                )
+        self.routes.append(definition)
+        logger.debug("Registered route: %s %s", method, path)
 
-        Args:
-            definition: A validated route definition dict.
-            allow_override: When True, silently replace conflicting entries.
-
-        Raises:
-            RouteConflictError: If the route already exists and allow_override is False.
-        """
-        key = (definition["method"].upper(), definition["path"])
-        if key in self._routes and not allow_override:
-            raise RouteConflictError(
-                f"Route {key[0]} {key[1]} is already registered."
-            )
-        self._routes[key] = definition
-
-    def load_definitions(
-        self, definitions: list, source: str = "<unknown>", *, allow_override: bool = False
-    ) -> int:
-        """Validate and register a list of definitions.
-
-        Returns:
-            Number of routes successfully registered.
-        """
-        validated = validate_definitions(definitions, source=source)
+    def load_definitions(self, directory: str) -> None:
+        """Load, validate, and register all definitions from *directory*."""
+        self.directory = directory
+        raw = load_definitions_dir(directory)
+        validated = validate_definitions(raw)
         for defn in validated:
-            self.register(defn, allow_override=allow_override)
-        return len(validated)
+            self.register(defn)
+        logger.info(
+            "Loaded %d definition(s) from %s", len(validated), directory
+        )
 
     def clear(self) -> None:
-        """Remove all registered routes."""
-        self._routes.clear()
+        """Remove all registered routes (directory pointer is preserved)."""
+        self.routes.clear()
+        logger.debug("Registry cleared.")
 
     # ------------------------------------------------------------------
-    # Lookup
+    # Resolution
     # ------------------------------------------------------------------
 
-    def lookup(self, method: str, path: str) -> dict | None:
-        """Return the matching definition or None."""
-        return self._routes.get((method.upper(), path))
+    def resolve(self, method: str, path: str) -> Optional[tuple[dict, MatchResult]]:
+        """Return the first matching (definition, match_result) pair or None."""
+        for defn in self.routes:
+            if defn["method"] != method.upper():
+                continue
+            result = match_route(defn["path"], path)
+            if result.matched:
+                return defn, result
+        return None
+
+    # ------------------------------------------------------------------
+    # Dunder helpers
+    # ------------------------------------------------------------------
 
     def __len__(self) -> int:
-        return len(self._routes)
+        return len(self.routes)
 
-    def __iter__(self) -> Iterator[dict]:
-        return iter(self._routes.values())
+    def __repr__(self) -> str:  # pragma: no cover
+        return f"Registry(routes={len(self.routes)})"
